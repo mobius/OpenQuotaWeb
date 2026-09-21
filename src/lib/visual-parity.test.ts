@@ -71,6 +71,13 @@ describe('native visual contract', () => {
     expect(account.container.innerHTML).toBe(claude.container.innerHTML);
   });
 
+  it('reuses the Cursor mark for Cursor account cards', () => {
+    const cursor = render(ProviderIcon, { providerId: 'cursor' });
+    const account = render(ProviderIcon, { providerId: 'cursor@1234abcd' });
+
+    expect(account.container.innerHTML).toBe(cursor.container.innerHTML);
+  });
+
   it('uses the shared hover dwell and grace timing for Usage Trend details', async () => {
     vi.useFakeTimers();
     const today = new Date();

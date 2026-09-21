@@ -1,11 +1,13 @@
 <script lang="ts">
   import { saveProviderCredentials } from './backend';
+  import { providerFamily } from './providerIconPaths';
 
   interface Props {
     providerId: string;
     providerName: string;
   }
   let { providerId, providerName }: Props = $props();
+  const providerKey = $derived(providerFamily(providerId));
 
   const targets: Record<string, string> = {
     codex: '~/.codex/auth.json',
@@ -14,7 +16,7 @@
     antigravity: 'Antigravity auth.json',
   };
 
-  const supported = $derived(providerId in targets);
+  const supported = $derived(providerKey in targets);
   let content = $state('');
   let status = $state<'idle' | 'saving' | 'saved' | 'error'>('idle');
   let error = $state('');
@@ -24,7 +26,7 @@
     status = 'saving';
     error = '';
     try {
-      await saveProviderCredentials(providerId, content);
+      await saveProviderCredentials(providerKey, content);
       content = '';
       status = 'saved';
     } catch (cause) {
@@ -38,7 +40,7 @@
   <div class="metric-section credentials-section">
     <h2>Sign in</h2>
     <p class="credentials-help">
-      Paste the contents of your <code>{targets[providerId]}</code> file from the computer where
+      Paste the contents of your <code>{targets[providerKey]}</code> file from the computer where
       {providerName} is already signed in.
     </p>
     <textarea

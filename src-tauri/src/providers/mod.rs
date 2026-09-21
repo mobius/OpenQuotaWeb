@@ -69,7 +69,7 @@ pub enum CacheIdentity<'a> {
 
 pub struct AccountRefresh {
     pub family: &'static str,
-    pub provider_id: &'static str,
+    pub provider_id: String,
     pub identity: String,
 }
 

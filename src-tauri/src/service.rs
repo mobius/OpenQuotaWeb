@@ -447,7 +447,7 @@ impl ProviderService {
             .is_some_and(|account| {
                 self.settings.as_ref().is_some_and(|settings| {
                     settings
-                        .activate_account(account.family, account.provider_id, &account.identity)
+                        .activate_account(account.family, &account.provider_id, &account.identity)
                         .is_err()
                 })
             });
@@ -856,7 +856,7 @@ mod tests {
                 cache_identity: Some(self.identity.clone()),
                 account: Some(AccountRefresh {
                     family: "codex",
-                    provider_id: "codex",
+                    provider_id: "codex".into(),
                     identity: self.identity.clone(),
                 }),
             })

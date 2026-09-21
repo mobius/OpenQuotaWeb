@@ -3,7 +3,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import WebDashboard from './WebDashboard.svelte';
 import { ProviderCatalogIndex } from './metrics';
 import type { AppSettings, ProviderViewState, UsageViewState } from './types';
-import { claudeState, liveState, providerCatalog, settingsState } from '../test/appFixtures';
+import {
+  claudeState,
+  codexState,
+  liveState,
+  providerCatalog,
+  settingsState,
+} from '../test/appFixtures';
 
 const catalog = new ProviderCatalogIndex(providerCatalog);
 const now = Date.parse('2026-07-10T10:00:00Z');
@@ -12,6 +18,7 @@ function renderDashboard(
   overrides: Partial<{
     viewState: UsageViewState;
     settings: AppSettings;
+    catalog: ProviderCatalogIndex;
     anyRefreshing: boolean;
     onRefreshAll: () => void;
     onRefreshProvider: (id: string) => void;
@@ -164,5 +171,62 @@ describe('WebDashboard', () => {
     expect(providers.getByRole('heading', { name: 'Codex' })).toBeInTheDocument();
     expect(providers.getByRole('heading', { name: 'Claude' })).toBeInTheDocument();
     expect(providers.getByText('Max')).toBeInTheDocument();
+  });
+
+  it('renders multiple discovered Cursor accounts independently', () => {
+    const cursorCatalog = new ProviderCatalogIndex({
+      apiKeyProviderIds: [],
+      providers: [
+        {
+          id: 'cursor@1111aaaa',
+          displayName: 'Cursor — 1111aaaa',
+          shortName: 'Cu',
+          fallbackEnabled: true,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+        {
+          id: 'cursor@2222bbbb',
+          displayName: 'Cursor — 2222bbbb',
+          shortName: 'Cu',
+          fallbackEnabled: false,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+      ],
+    });
+    const settings = {
+      ...structuredClone(settingsState.settings),
+      knownProviderIds: ['cursor@1111aaaa', 'cursor@2222bbbb'],
+      providerNames: {
+        'cursor@1111aaaa': 'Cursor Work',
+        'cursor@2222bbbb': 'Cursor Personal',
+      },
+      providers: [
+        { id: 'cursor@1111aaaa', enabled: true, detected: true, expanded: false, metrics: [] },
+        { id: 'cursor@2222bbbb', enabled: true, detected: true, expanded: false, metrics: [] },
+      ],
+    };
+    const viewState: UsageViewState = {
+      providers: {
+        'cursor@1111aaaa': {
+          ...codexState,
+          snapshot: { ...codexState.snapshot!, providerId: 'cursor@1111aaaa' },
+        },
+        'cursor@2222bbbb': {
+          ...claudeState,
+          snapshot: { ...claudeState.snapshot!, providerId: 'cursor@2222bbbb' },
+        },
+      },
+    };
+    renderDashboard({ catalog: cursorCatalog, settings, viewState });
+
+    const providers = within(screen.getByRole('region', { name: 'Providers' }));
+    expect(providers.getByRole('heading', { name: 'Cursor Work' })).toBeInTheDocument();
+    expect(providers.getByRole('heading', { name: 'Cursor Personal' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh Cursor Work' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh Cursor Personal' })).toBeInTheDocument();
   });
 });

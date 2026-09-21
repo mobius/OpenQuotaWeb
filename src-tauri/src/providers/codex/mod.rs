@@ -407,7 +407,7 @@ impl crate::providers::UsageProvider for CodexProvider {
             cache_identity: identity.clone(),
             account: identity.map(|identity| crate::providers::AccountRefresh {
                 family: "codex",
-                provider_id: "codex",
+                provider_id: "codex".into(),
                 identity,
             }),
         })
