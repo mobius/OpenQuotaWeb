@@ -11,6 +11,7 @@ use base64::{
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 use super::GrokError;
@@ -51,6 +52,16 @@ impl GrokAuthStore {
     pub fn new() -> Self {
         Self {
             path: home_directory().join(".grok").join("auth.json"),
+        }
+
+        impl GrokAuthState {
+            pub fn account_identity(&self) -> String {
+                let stamp = token_subject(&self.token)
+                    .or_else(|| self.entry.id_token.as_deref().and_then(token_subject))
+                    .unwrap_or_else(|| self.entry_key.clone());
+                let digest = Sha256::digest(stamp.to_ascii_lowercase().as_bytes());
+                hex::encode(digest)
+            }
         }
     }
 
@@ -242,6 +253,22 @@ pub fn token_expiry(token: &str) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp(seconds as i64, 0)
 }
 
+fn token_subject(token: &str) -> Option<String> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| URL_SAFE.decode(payload))
+        .ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("sub")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("email").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
 fn number(value: &Value) -> Option<f64> {
     value
         .as_f64()
@@ -302,6 +329,7 @@ mod tests {
         assert_eq!(candidates[0].token, "token-a");
         assert_eq!(store.client_id(&candidates[0]), "client-a");
         assert_eq!(store.client_id(&candidates[1]), "client-b");
+        assert_eq!(candidates[0].account_identity().len(), 64);
     }
 
     #[test]

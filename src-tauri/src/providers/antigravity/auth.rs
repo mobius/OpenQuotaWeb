@@ -27,6 +27,12 @@ pub struct AntigravityToken {
 }
 
 #[derive(Debug, Clone)]
+pub struct AntigravityTokenCandidate {
+    pub account: String,
+    pub token: AntigravityToken,
+}
+
+#[derive(Debug, Clone)]
 pub struct AccessTokenCache {
     path: PathBuf,
 }
@@ -133,14 +139,71 @@ pub fn load_token() -> Result<Option<AntigravityToken>, AntigravityError> {
         .ok_or(AntigravityError::InvalidCredentialData)
 }
 
+pub fn load_token_for_account(account: &str) -> Result<Option<AntigravityToken>, AntigravityError> {
+    let Some(raw) = read_generic_password("gemini", account)
+        .map_err(|_| AntigravityError::CredentialStoreUnreadable)?
+    else {
+        return Ok(None);
+    };
+    extract_token(&raw)
+        .map(Some)
+        .ok_or(AntigravityError::InvalidCredentialData)
+}
+
+pub fn load_token_candidates() -> Result<Vec<AntigravityTokenCandidate>, AntigravityError> {
+    let mut candidates = Vec::new();
+    let mut saw_invalid = false;
+    for account in keychain_accounts() {
+        match load_token_for_account(&account) {
+            Ok(Some(token)) => candidates.push(AntigravityTokenCandidate { account, token }),
+            Ok(None) => {}
+            Err(AntigravityError::InvalidCredentialData) => saw_invalid = true,
+            Err(error) => return Err(error),
+        }
+    }
+    dedup_candidates(&mut candidates);
+    if candidates.is_empty() && saw_invalid {
+        return Err(AntigravityError::InvalidCredentialData);
+    }
+    Ok(candidates)
+}
+
 pub fn has_local_credentials() -> bool {
-    credential_state_is_actionable(load_token())
+    credential_state_is_actionable(load_token().or_else(|_| {
+        load_token_candidates().map(|mut candidates| candidates.pop().map(|candidate| candidate.token))
+    }))
 }
 
 fn credential_state_is_actionable(
     state: Result<Option<AntigravityToken>, AntigravityError>,
 ) -> bool {
     !matches!(state, Ok(None))
+}
+
+fn dedup_candidates(candidates: &mut Vec<AntigravityTokenCandidate>) {
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|candidate| {
+        candidate
+            .token
+            .refresh_token
+            .as_deref()
+            .or(candidate.token.access_token.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| seen.insert(value.to_owned()))
+            .unwrap_or_else(|| seen.insert(candidate.account.clone()))
+    });
+}
+
+fn keychain_accounts() -> Vec<String> {
+    let user = std::env::var("USER")
+        .ok()
+        .or_else(|| std::env::var("USERNAME").ok())
+        .unwrap_or_default();
+    let mut accounts = vec!["antigravity".to_owned(), user, String::new()];
+    accounts.sort();
+    accounts.dedup();
+    accounts
 }
 
 pub fn credential_fingerprint(refresh_token: Option<&str>) -> Option<[u8; 32]> {

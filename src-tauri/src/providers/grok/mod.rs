@@ -10,6 +10,7 @@ use reqwest::StatusCode;
 use thiserror::Error;
 
 use crate::{
+    hashing::sha256_hex,
     models::{
         MetricDefinition, MetricSection, ProviderDefinition, ProviderErrorKind, ProviderLink,
         ProviderSnapshot, UsagePeriodSelection,
@@ -29,11 +30,15 @@ use self::{
 use super::{ProviderError, UsageProvider};
 
 pub(crate) fn definition() -> ProviderDefinition {
-    ProviderDefinition {
-        id: "grok".into(),
-        display_name: "Grok".into(),
+    definition_for("grok", "Grok", false)
+}
+
+fn definition_for(id: &str, display_name: &str, fallback_enabled: bool) -> ProviderDefinition {
+    let mut definition = ProviderDefinition {
+        id: id.into(),
+        display_name: display_name.into(),
         short_name: "G".into(),
-        fallback_enabled: false,
+        fallback_enabled,
         local_usage_source_note: Some("From your Grok logs (estimated)".into()),
         links: vec![ProviderLink::new("Usage", "https://grok.com/?_s=usage")],
         metrics: vec![
@@ -79,7 +84,16 @@ pub(crate) fn definition() -> ProviderDefinition {
                 "M",
             ),
         ],
+    };
+    if id != "grok" {
+        for metric in &mut definition.metrics {
+            if let Some(suffix) = metric.id.strip_prefix("grok.") {
+                metric.id = format!("{id}.{suffix}");
+            }
+            metric.default_pinned = false;
+        }
     }
+    definition
 }
 
 #[derive(Debug, Error)]
@@ -111,6 +125,8 @@ impl From<crate::storage::StorageError> for GrokError {
 }
 
 pub struct GrokProvider {
+    definition: ProviderDefinition,
+    account_identity: Option<String>,
     storage: Arc<Storage>,
     pricing: Arc<PricingStore>,
     auth: GrokAuthStore,
@@ -124,7 +140,33 @@ impl GrokProvider {
         storage: Arc<Storage>,
         pricing: Arc<PricingStore>,
     ) -> Result<Self, GrokError> {
+        let account_identity = GrokAuthStore::new()
+            .load_candidates()
+            .ok()
+            .and_then(|states| states.into_iter().next())
+            .map(|state| state.account_identity());
+        Self::new_scoped(
+            storage,
+            pricing,
+            definition(),
+            account_identity.map(|identity| account_identity_key(&identity)),
+        )
+    }
+
+    fn new_scoped(
+        storage: Arc<Storage>,
+        pricing: Arc<PricingStore>,
+        definition: ProviderDefinition,
+        account_identity: Option<String>,
+    ) -> Result<Self, GrokError> {
+        if definition.id == "grok" {
+            if let Some(identity) = account_identity.as_deref() {
+                crate::providers::remember_default_account(&storage, "grok", identity)?;
+            }
+        }
         Ok(Self {
+            definition,
+            account_identity,
             storage,
             pricing,
             auth: GrokAuthStore::new(),
@@ -134,16 +176,51 @@ impl GrokProvider {
         })
     }
 
+    pub(crate) fn runtimes(
+        storage: Arc<Storage>,
+        pricing: Arc<PricingStore>,
+    ) -> Result<Vec<Arc<dyn crate::providers::UsageProvider>>, GrokError> {
+        let primary = GrokAuthStore::new()
+            .load_candidates()
+            .ok()
+            .and_then(|states| states.into_iter().next())
+            .map(|state| account_identity_key(&state.account_identity()));
+        let mut runtimes = vec![Arc::new(Self::new_scoped(
+            storage.clone(),
+            pricing.clone(),
+            definition(),
+            primary.clone(),
+        )?) as Arc<dyn crate::providers::UsageProvider>];
+        for identity in discover_additional_accounts(primary.as_deref())? {
+            let provider_id = format!("grok@{}", &identity[..8]);
+            runtimes.push(Arc::new(Self::new_scoped(
+                storage.clone(),
+                pricing.clone(),
+                definition_for(
+                    &provider_id,
+                    &format!("Grok — {}", &provider_id["grok@".len()..]),
+                    false,
+                ),
+                Some(identity),
+            )?) as Arc<dyn crate::providers::UsageProvider>);
+        }
+        Ok(runtimes)
+    }
+
     #[cfg(test)]
     fn with_dependencies(
         storage: Arc<Storage>,
         pricing: Arc<PricingStore>,
+        definition: ProviderDefinition,
+        account_identity: Option<String>,
         auth: GrokAuthStore,
         client: GrokClient,
         log_usage: GrokLogUsageScanner,
         now: DateTime<Utc>,
     ) -> Self {
         Self {
+            definition,
+            account_identity,
             storage,
             pricing,
             auth,
@@ -163,7 +240,11 @@ impl GrokProvider {
         );
         let mut last_auth_error = None;
         for mut state in candidates {
-            match self.refresh_candidate(&mut state, now) {
+            let identity = account_identity_key(&state.account_identity());
+            if !self.matches_identity(&identity) {
+                continue;
+            }
+            match self.refresh_candidate(&mut state, now, &identity) {
                 Ok(snapshot) => return Ok(snapshot),
                 Err(error @ (GrokError::Expired | GrokError::InvalidAuth)) => {
                     last_auth_error = Some(error);
@@ -178,6 +259,7 @@ impl GrokProvider {
         &self,
         state: &mut GrokAuthState,
         now: DateTime<Utc>,
+        account_identity: &str,
     ) -> Result<ProviderSnapshot, GrokError> {
         let mut warnings = Vec::new();
         if self.auth.needs_refresh(state, now) {
@@ -210,14 +292,14 @@ impl GrokProvider {
         let pricing = self.pricing.current();
         let usage = scan_or_cached_usage(
             &self.storage,
-            "grok",
-            crate::providers::CacheIdentity::Unscoped,
+            &self.definition.id,
+            crate::providers::CacheIdentity::Resolved(account_identity),
             "Grok",
             || self.log_usage.scan(&self.storage, now, &pricing),
             &mut warnings,
         );
         Ok(ProviderSnapshot {
-            provider_id: "grok".into(),
+            provider_id: self.definition.id.clone(),
             plan,
             quotas: mapped.quotas,
             value_metrics: Vec::new(),
@@ -227,6 +309,13 @@ impl GrokProvider {
             warnings,
             refreshed_at: now,
         })
+    }
+
+    fn matches_identity(&self, identity: &str) -> bool {
+        self.account_identity
+            .as_deref()
+            .map(|expected| expected == identity)
+            .unwrap_or(true)
     }
 
     fn refresh_access_token(
@@ -266,11 +355,26 @@ impl GrokProvider {
 
 impl UsageProvider for GrokProvider {
     fn definition(&self) -> ProviderDefinition {
-        definition()
+        self.definition.clone()
     }
 
     fn has_local_credentials(&self) -> bool {
         self.auth.has_local_credentials()
+    }
+
+    fn cache_identity(&self) -> crate::providers::CacheIdentity<'_> {
+        self.account_identity
+            .as_deref()
+            .map(crate::providers::CacheIdentity::Resolved)
+            .unwrap_or(crate::providers::CacheIdentity::Unresolved)
+    }
+
+    fn supports_account_names(&self) -> bool {
+        true
+    }
+
+    fn account_identity(&self) -> Option<&str> {
+        self.account_identity.as_deref()
     }
 
     fn refresh(&self) -> Result<ProviderSnapshot, ProviderError> {
@@ -291,6 +395,48 @@ impl UsageProvider for GrokProvider {
             ProviderError::from_display(kind, error)
         })
     }
+
+    fn refresh_for_service(
+        &self,
+    ) -> Result<crate::providers::ProviderRefresh, crate::providers::ProviderError> {
+        let snapshot = self.refresh()?;
+        Ok(crate::providers::ProviderRefresh {
+            snapshot,
+            cache_identity: self.account_identity.clone(),
+            account: self
+                .account_identity
+                .clone()
+                .map(|identity| crate::providers::AccountRefresh {
+                    family: "grok",
+                    provider_id: self.definition.id.clone(),
+                    identity,
+                }),
+        })
+    }
+}
+
+fn account_identity_key(identity: &str) -> String {
+    sha256_hex(identity.as_bytes())
+}
+
+fn discover_additional_accounts(primary_identity: Option<&str>) -> Result<Vec<String>, GrokError> {
+    let identities = GrokAuthStore::new()
+        .load_candidates()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|state| account_identity_key(&state.account_identity()))
+        .collect::<Vec<_>>();
+    let mut identities = identities;
+    identities.sort();
+    identities.dedup();
+    if let Some(primary_identity) = primary_identity {
+        identities.retain(|identity| identity != primary_identity);
+        return Ok(identities);
+    }
+    if identities.len() <= 1 {
+        return Ok(Vec::new());
+    }
+    Ok(identities.into_iter().skip(1).collect())
 }
 
 #[cfg(test)]
