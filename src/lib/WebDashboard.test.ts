@@ -229,4 +229,61 @@ describe('WebDashboard', () => {
     expect(screen.getByRole('button', { name: 'Refresh Cursor Work' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Refresh Cursor Personal' })).toBeInTheDocument();
   });
+
+  it('renders multiple discovered Codex accounts independently', () => {
+    const codexCatalog = new ProviderCatalogIndex({
+      apiKeyProviderIds: [],
+      providers: [
+        {
+          id: 'codex',
+          displayName: 'Codex',
+          shortName: 'Cx',
+          fallbackEnabled: true,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+        {
+          id: 'codex@2222bbbb',
+          displayName: 'Codex — 2222bbbb',
+          shortName: 'Cx',
+          fallbackEnabled: false,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+      ],
+    });
+    const settings = {
+      ...structuredClone(settingsState.settings),
+      knownProviderIds: ['codex', 'codex@2222bbbb'],
+      providerNames: {
+        codex: 'Codex Work',
+        'codex@2222bbbb': 'Codex Personal',
+      },
+      providers: [
+        { id: 'codex', enabled: true, detected: true, expanded: false, metrics: [] },
+        { id: 'codex@2222bbbb', enabled: true, detected: true, expanded: false, metrics: [] },
+      ],
+    };
+    const viewState: UsageViewState = {
+      providers: {
+        codex: {
+          ...codexState,
+          snapshot: { ...codexState.snapshot!, providerId: 'codex' },
+        },
+        'codex@2222bbbb': {
+          ...claudeState,
+          snapshot: { ...claudeState.snapshot!, providerId: 'codex@2222bbbb' },
+        },
+      },
+    };
+    renderDashboard({ catalog: codexCatalog, settings, viewState });
+
+    const providers = within(screen.getByRole('region', { name: 'Providers' }));
+    expect(providers.getByRole('heading', { name: 'Codex Work' })).toBeInTheDocument();
+    expect(providers.getByRole('heading', { name: 'Codex Personal' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh Codex Work' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh Codex Personal' })).toBeInTheDocument();
+  });
 });

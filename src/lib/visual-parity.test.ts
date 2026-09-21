@@ -71,6 +71,13 @@ describe('native visual contract', () => {
     expect(account.container.innerHTML).toBe(claude.container.innerHTML);
   });
 
+  it('reuses the Codex mark for Codex account cards', () => {
+    const codex = render(ProviderIcon, { providerId: 'codex' });
+    const account = render(ProviderIcon, { providerId: 'codex@1234abcd' });
+
+    expect(account.container.innerHTML).toBe(codex.container.innerHTML);
+  });
+
   it('reuses the Cursor mark for Cursor account cards', () => {
     const cursor = render(ProviderIcon, { providerId: 'cursor' });
     const account = render(ProviderIcon, { providerId: 'cursor@1234abcd' });

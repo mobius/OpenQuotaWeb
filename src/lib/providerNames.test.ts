@@ -6,10 +6,11 @@ const settings = { providerNames: {} } as AppSettings;
 
 describe('provider card names', () => {
   it('uses the account cards observed by the backend', () => {
-    const observed = ['claude', 'claude@1234abcd', 'codex', 'cursor@abcdef12'];
+    const observed = ['claude', 'claude@1234abcd', 'codex', 'codex@feedbeef', 'cursor@abcdef12'];
     expect(canRenameProvider('claude', observed)).toBe(true);
     expect(canRenameProvider('claude@1234abcd', observed)).toBe(true);
     expect(canRenameProvider('codex', observed)).toBe(true);
+    expect(canRenameProvider('codex@feedbeef', observed)).toBe(true);
     expect(canRenameProvider('cursor@abcdef12', observed)).toBe(true);
     expect(canRenameProvider('grok', observed)).toBe(false);
   });

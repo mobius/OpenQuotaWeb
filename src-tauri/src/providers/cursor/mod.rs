@@ -3,15 +3,17 @@ pub mod client;
 pub mod csv;
 pub mod mapper;
 
-use std::sync::Arc;
-#[cfg(any(feature = "desktop", test))]
+#[cfg(any(feature = "desktop", feature = "web", test))]
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use chrono::{Days, Local, TimeZone, Utc};
 use reqwest::StatusCode;
 use serde_json::Value;
 use thiserror::Error;
 
+#[cfg(any(feature = "desktop", feature = "web", test))]
+use crate::hashing::sha256_hex;
 use crate::{
     models::{
         MetricDefinition, MetricSection, ProviderDefinition, ProviderLink, ProviderSnapshot,
@@ -19,8 +21,6 @@ use crate::{
     },
     pricing::PricingStore,
 };
-#[cfg(any(feature = "desktop", test))]
-use crate::hashing::sha256_hex;
 
 use self::{
     auth::CursorAuthState,
@@ -133,7 +133,7 @@ fn definition_for(id: &str, display_name: &str, fallback_enabled: bool) -> Provi
     }
 }
 
-#[cfg(any(feature = "desktop", test))]
+#[cfg(any(feature = "desktop", feature = "web", test))]
 pub(crate) fn runtimes(
     pricing: Arc<PricingStore>,
 ) -> Result<Vec<Arc<dyn crate::providers::UsageProvider>>, CursorError> {
@@ -166,7 +166,7 @@ pub(crate) fn runtimes(
         .collect()
 }
 
-#[cfg(any(feature = "desktop", test))]
+#[cfg(any(feature = "desktop", feature = "web", test))]
 #[derive(Debug, Clone)]
 struct CursorDiscoveredAccount {
     provider_id: String,
@@ -174,7 +174,7 @@ struct CursorDiscoveredAccount {
     auth_source: auth::CursorAuthSource,
 }
 
-#[cfg(any(feature = "desktop", test))]
+#[cfg(any(feature = "desktop", feature = "web", test))]
 fn discover_accounts() -> Vec<CursorDiscoveredAccount> {
     let mut occupied = HashSet::new();
     auth::discover_sqlite_auth_states()
@@ -198,7 +198,7 @@ fn discover_accounts() -> Vec<CursorDiscoveredAccount> {
         .collect()
 }
 
-#[cfg(any(feature = "desktop", test))]
+#[cfg(any(feature = "desktop", feature = "web", test))]
 fn allocate_account_id(identity_hash: &str, occupied: &HashSet<String>) -> String {
     for salt in 0_u64.. {
         let stamp = if salt == 0 {

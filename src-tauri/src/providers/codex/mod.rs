@@ -26,11 +26,15 @@ use self::{
 use crate::providers::log_usage::scan_or_cached_usage;
 
 pub(crate) fn definition() -> ProviderDefinition {
-    ProviderDefinition {
-        id: "codex".into(),
-        display_name: "Codex".into(),
+    definition_for("codex", "Codex", true)
+}
+
+fn definition_for(id: &str, display_name: &str, fallback_enabled: bool) -> ProviderDefinition {
+    let mut definition = ProviderDefinition {
+        id: id.into(),
+        display_name: display_name.into(),
         short_name: "Cx".into(),
-        fallback_enabled: true,
+        fallback_enabled,
         local_usage_source_note: Some("From your Codex logs (estimated)".into()),
         links: vec![
             ProviderLink::new("Status", "https://status.openai.com/"),
@@ -120,7 +124,16 @@ pub(crate) fn definition() -> ProviderDefinition {
                 "M",
             ),
         ],
+    };
+    if id != "codex" {
+        for metric in &mut definition.metrics {
+            if let Some(suffix) = metric.id.strip_prefix("codex.") {
+                metric.id = format!("{id}.{suffix}");
+            }
+            metric.default_pinned = false;
+        }
     }
+    definition
 }
 
 #[derive(Debug, Error)]
@@ -164,6 +177,7 @@ impl From<crate::storage::StorageError> for CodexError {
 }
 
 pub struct CodexProvider {
+    definition: ProviderDefinition,
     account_identity: Option<String>,
     storage: Arc<Storage>,
     pricing: Arc<PricingStore>,
@@ -174,15 +188,58 @@ impl CodexProvider {
     pub fn new(storage: Arc<Storage>, pricing: Arc<PricingStore>) -> Result<Self, CodexError> {
         let account_identity = CodexAuthState::observed_account_identity()
             .map(|identity| account_identity_key(&identity));
-        if let Some(identity) = account_identity.as_deref() {
-            crate::providers::remember_default_account(&storage, "codex", identity)?;
+        Self::new_scoped(storage, pricing, definition(), account_identity)
+    }
+
+    fn new_scoped(
+        storage: Arc<Storage>,
+        pricing: Arc<PricingStore>,
+        definition: ProviderDefinition,
+        account_identity: Option<String>,
+    ) -> Result<Self, CodexError> {
+        if definition.id == "codex" {
+            if let Some(identity) = account_identity.as_deref() {
+                crate::providers::remember_default_account(&storage, "codex", identity)?;
+            }
         }
         Ok(Self {
+            definition,
             account_identity,
             storage,
             pricing,
             client: CodexClient::new()?,
         })
+    }
+
+    pub(crate) fn runtimes(
+        storage: Arc<Storage>,
+        pricing: Arc<PricingStore>,
+    ) -> Result<Vec<Arc<dyn crate::providers::UsageProvider>>, CodexError> {
+        let account_identity = CodexAuthState::observed_account_identity()
+            .map(|identity| account_identity_key(&identity));
+        let mut runtimes = vec![Arc::new(Self::new_scoped(
+            storage.clone(),
+            pricing.clone(),
+            definition(),
+            account_identity.clone(),
+        )?) as Arc<dyn crate::providers::UsageProvider>];
+
+        let discovered =
+            discover_additional_accounts(account_identity.as_deref()).unwrap_or_default();
+        for identity in discovered {
+            let provider_id = format!("codex@{}", &identity[..8]);
+            runtimes.push(Arc::new(Self::new_scoped(
+                storage.clone(),
+                pricing.clone(),
+                definition_for(
+                    &provider_id,
+                    &format!("Codex — {}", &provider_id["codex@".len()..]),
+                    false,
+                ),
+                Some(identity),
+            )?) as Arc<dyn crate::providers::UsageProvider>);
+        }
+        Ok(runtimes)
     }
 
     pub fn refresh(&self) -> Result<ProviderSnapshot, CodexError> {
@@ -289,7 +346,7 @@ impl CodexProvider {
         );
         Self::ensure_candidate_source_current(auth, account_identity)?;
         Ok(ProviderSnapshot {
-            provider_id: "codex".into(),
+            provider_id: self.definition.id.clone(),
             plan: mapped.plan,
             quotas: mapped.quotas,
             value_metrics: mapped.value_metrics,
@@ -339,6 +396,36 @@ fn account_identity_key(identity: &str) -> String {
     sha256_hex(identity.as_bytes())
 }
 
+fn discover_additional_accounts(primary_identity: Option<&str>) -> Result<Vec<String>, CodexError> {
+    let candidates = match CodexAuthState::load_candidates() {
+        Ok(candidates) => candidates,
+        Err(CodexError::ApiKeyOnly | CodexError::NotLoggedIn) => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let identities = candidates
+        .into_iter()
+        .filter_map(|state| state.account_identity())
+        .map(|identity| account_identity_key(&identity))
+        .collect::<Vec<_>>();
+    Ok(additional_account_identities(identities, primary_identity))
+}
+
+fn additional_account_identities(
+    mut identities: Vec<String>,
+    primary_identity: Option<&str>,
+) -> Vec<String> {
+    identities.sort();
+    identities.dedup();
+    if let Some(primary_identity) = primary_identity {
+        identities.retain(|identity| identity != primary_identity);
+        return identities;
+    }
+    if identities.len() <= 1 {
+        return Vec::new();
+    }
+    identities.into_iter().skip(1).collect()
+}
+
 fn validate_account_identity(
     expected: Option<&str>,
     observed: Option<&str>,
@@ -372,7 +459,7 @@ fn provider_error(error: CodexError) -> crate::providers::ProviderError {
 
 impl crate::providers::UsageProvider for CodexProvider {
     fn definition(&self) -> ProviderDefinition {
-        definition()
+        self.definition.clone()
     }
 
     fn has_local_credentials(&self) -> bool {
@@ -407,7 +494,7 @@ impl crate::providers::UsageProvider for CodexProvider {
             cache_identity: identity.clone(),
             account: identity.map(|identity| crate::providers::AccountRefresh {
                 family: "codex",
-                provider_id: "codex".into(),
+                provider_id: self.definition.id.clone(),
                 identity,
             }),
         })
@@ -420,7 +507,9 @@ mod account_tests {
 
     use tempfile::tempdir;
 
-    use super::{validate_account_identity, CodexClient, CodexError, CodexProvider};
+    use super::{
+        definition_for, validate_account_identity, CodexClient, CodexError, CodexProvider,
+    };
     use crate::{
         pricing::PricingStore,
         providers::{CacheIdentity, UsageProvider},
@@ -451,12 +540,14 @@ mod account_tests {
         let storage = Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
         let pricing = Arc::new(PricingStore::new(directory.path().join("pricing")).unwrap());
         let provider = CodexProvider {
+            definition: super::definition(),
             account_identity: Some("account-a".into()),
             storage: storage.clone(),
             pricing: pricing.clone(),
             client: CodexClient::new().unwrap(),
         };
         let unresolved = CodexProvider {
+            definition: super::definition(),
             account_identity: None,
             storage,
             pricing,
@@ -471,5 +562,32 @@ mod account_tests {
             UsageProvider::cache_identity(&unresolved),
             CacheIdentity::Unresolved
         );
+    }
+
+    #[test]
+    fn scoped_definition_rewrites_ids_for_codex_accounts() {
+        let definition = definition_for("codex@1234abcd", "Codex — 1234abcd", false);
+        assert_eq!(definition.id, "codex@1234abcd");
+        assert_eq!(definition.display_name, "Codex — 1234abcd");
+        assert!(!definition.fallback_enabled);
+        assert!(definition
+            .metrics
+            .iter()
+            .all(|metric| metric.id.starts_with("codex@1234abcd.")));
+    }
+
+    #[test]
+    fn additional_account_selection_is_stable_and_deduplicated() {
+        let identities = super::additional_account_identities(
+            vec!["bbbb".into(), "aaaa".into(), "bbbb".into(), "cccc".into()],
+            Some("aaaa"),
+        );
+        assert_eq!(identities, ["bbbb", "cccc"]);
+
+        let fallback = super::additional_account_identities(
+            vec!["bbbb".into(), "aaaa".into(), "bbbb".into(), "cccc".into()],
+            None,
+        );
+        assert_eq!(fallback, ["bbbb", "cccc"]);
     }
 }

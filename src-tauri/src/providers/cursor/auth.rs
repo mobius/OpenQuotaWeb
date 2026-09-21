@@ -68,7 +68,7 @@ pub(crate) fn load_sqlite_auth_state(path: &Path) -> Option<CursorAuthState> {
     load_sqlite_auth(path).map(|(auth, _)| auth)
 }
 
-#[cfg(any(feature = "desktop", test))]
+#[cfg(any(feature = "desktop", feature = "web", test))]
 pub(crate) fn discover_sqlite_auth_states() -> Vec<CursorAuthState> {
     discover_sqlite_auth_states_in(state_database_paths())
 }
@@ -115,7 +115,7 @@ fn load_sqlite_auth(path: &Path) -> Option<(CursorAuthState, Option<String>)> {
     ))
 }
 
-#[cfg(any(feature = "desktop", test))]
+#[cfg(any(feature = "desktop", feature = "web", test))]
 fn discover_sqlite_auth_states_in(paths: Vec<PathBuf>) -> Vec<CursorAuthState> {
     paths
         .into_iter()
