@@ -144,7 +144,8 @@ impl AntigravityProvider {
         let discovered = discovered_accounts()?;
         let primary = discovered.first().map(|(identity, _, _)| identity.clone());
         if let Some(identity) = primary.as_deref() {
-            crate::providers::remember_default_account(&storage, "antigravity", identity)?;
+            crate::providers::remember_default_account(&storage, "antigravity", identity)
+                .map_err(|_| AntigravityError::Unavailable)?;
         }
         let mut runtimes = vec![Arc::new(Self::new_scoped(
             cache_path.clone(),
@@ -439,7 +440,13 @@ fn remote_plan(value: &Value) -> Option<String> {
 }
 
 fn discovered_accounts() -> Result<Vec<(String, String, String)>, AntigravityError> {
-    let mut accounts = load_token_candidates()?
+    Ok(discovered_accounts_from_candidates(load_token_candidates()?))
+}
+
+fn discovered_accounts_from_candidates(
+    candidates: Vec<auth::AntigravityTokenCandidate>,
+) -> Vec<(String, String, String)> {
+    let mut accounts = candidates
         .into_iter()
         .filter_map(|candidate| {
             let identity_stamp = candidate
@@ -469,7 +476,7 @@ fn discovered_accounts() -> Result<Vec<(String, String, String)>, AntigravityErr
         .collect::<Vec<_>>();
     accounts.sort_by(|left, right| left.0.cmp(&right.0));
     accounts.dedup_by(|left, right| left.0 == right.0);
-    Ok(accounts)
+    accounts
 }
 
 fn snapshot(
@@ -562,7 +569,8 @@ mod tests {
     use chrono::{Duration, TimeZone, Utc};
 
     use super::{
-        access_token_candidates, auth::AntigravityToken, credential_failure, has_refresh_source,
+        access_token_candidates, auth::{AntigravityToken, AntigravityTokenCandidate},
+        credential_failure, discovered_accounts_from_candidates, has_refresh_source,
         should_refresh_access_token, AntigravityError,
     };
 
@@ -635,5 +643,40 @@ mod tests {
             false
         }));
         assert!(!discovery_called.get());
+    }
+
+    #[test]
+    fn discovered_accounts_are_sorted_and_deduplicated() {
+        let accounts = discovered_accounts_from_candidates(vec![
+            AntigravityTokenCandidate {
+                account: "work".into(),
+                token: AntigravityToken {
+                    access_token: Some("access-b".into()),
+                    refresh_token: Some("refresh-b".into()),
+                    expiry: None,
+                },
+            },
+            AntigravityTokenCandidate {
+                account: "personal".into(),
+                token: AntigravityToken {
+                    access_token: Some("access-a".into()),
+                    refresh_token: Some("refresh-a".into()),
+                    expiry: None,
+                },
+            },
+            AntigravityTokenCandidate {
+                account: "duplicate".into(),
+                token: AntigravityToken {
+                    access_token: Some("access-a2".into()),
+                    refresh_token: Some("refresh-a".into()),
+                    expiry: None,
+                },
+            },
+        ]);
+
+        assert_eq!(accounts.len(), 2);
+        assert!(accounts[0].0 <= accounts[1].0);
+        assert_eq!(accounts[0].2, "personal");
+        assert_eq!(accounts[1].2, "work");
     }
 }

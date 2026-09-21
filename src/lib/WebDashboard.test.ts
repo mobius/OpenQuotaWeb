@@ -286,4 +286,84 @@ describe('WebDashboard', () => {
     expect(screen.getByRole('button', { name: 'Refresh Codex Work' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Refresh Codex Personal' })).toBeInTheDocument();
   });
+
+  it('renders multiple discovered Grok and Google accounts independently', () => {
+    const accountCatalog = new ProviderCatalogIndex({
+      apiKeyProviderIds: [],
+      providers: [
+        {
+          id: 'grok@1111aaaa',
+          displayName: 'Grok — 1111aaaa',
+          shortName: 'G',
+          fallbackEnabled: true,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+        {
+          id: 'grok@2222bbbb',
+          displayName: 'Grok — 2222bbbb',
+          shortName: 'G',
+          fallbackEnabled: false,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+        {
+          id: 'antigravity@3333cccc',
+          displayName: 'Google — 3333cccc',
+          shortName: 'A',
+          fallbackEnabled: true,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+      ],
+    });
+    const settings = {
+      ...structuredClone(settingsState.settings),
+      knownProviderIds: ['grok@1111aaaa', 'grok@2222bbbb', 'antigravity@3333cccc'],
+      providerNames: {
+        'grok@1111aaaa': 'Grok Work',
+        'grok@2222bbbb': 'Grok Personal',
+        'antigravity@3333cccc': 'Google Personal',
+      },
+      providers: [
+        { id: 'grok@1111aaaa', enabled: true, detected: true, expanded: false, metrics: [] },
+        { id: 'grok@2222bbbb', enabled: true, detected: true, expanded: false, metrics: [] },
+        {
+          id: 'antigravity@3333cccc',
+          enabled: true,
+          detected: true,
+          expanded: false,
+          metrics: [],
+        },
+      ],
+    };
+    const viewState: UsageViewState = {
+      providers: {
+        'grok@1111aaaa': {
+          ...codexState,
+          snapshot: { ...codexState.snapshot!, providerId: 'grok@1111aaaa' },
+        },
+        'grok@2222bbbb': {
+          ...claudeState,
+          snapshot: { ...claudeState.snapshot!, providerId: 'grok@2222bbbb' },
+        },
+        'antigravity@3333cccc': {
+          ...claudeState,
+          snapshot: { ...claudeState.snapshot!, providerId: 'antigravity@3333cccc' },
+        },
+      },
+    };
+    renderDashboard({ catalog: accountCatalog, settings, viewState });
+
+    const providers = within(screen.getByRole('region', { name: 'Providers' }));
+    expect(providers.getByRole('heading', { name: 'Grok Work' })).toBeInTheDocument();
+    expect(providers.getByRole('heading', { name: 'Grok Personal' })).toBeInTheDocument();
+    expect(providers.getByRole('heading', { name: 'Google Personal' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh Grok Work' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh Grok Personal' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh Google Personal' })).toBeInTheDocument();
+  });
 });

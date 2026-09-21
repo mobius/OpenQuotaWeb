@@ -11,10 +11,10 @@ use base64::{
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 use super::GrokError;
+use crate::hashing::sha256_hex;
 
 const DEFAULT_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 const REFRESH_BUFFER_MINUTES: i64 = 5;
@@ -52,16 +52,6 @@ impl GrokAuthStore {
     pub fn new() -> Self {
         Self {
             path: home_directory().join(".grok").join("auth.json"),
-        }
-
-        impl GrokAuthState {
-            pub fn account_identity(&self) -> String {
-                let stamp = token_subject(&self.token)
-                    .or_else(|| self.entry.id_token.as_deref().and_then(token_subject))
-                    .unwrap_or_else(|| self.entry_key.clone());
-                let digest = Sha256::digest(stamp.to_ascii_lowercase().as_bytes());
-                hex::encode(digest)
-            }
         }
     }
 
@@ -192,6 +182,15 @@ impl GrokAuthStore {
         write_private_json_atomic(&self.path, &document)?;
         state.document = document;
         Ok(())
+    }
+}
+
+impl GrokAuthState {
+    pub fn account_identity(&self) -> String {
+        let stamp = token_subject(&self.token)
+            .or_else(|| self.entry.id_token.as_deref().and_then(token_subject))
+            .unwrap_or_else(|| self.entry_key.clone());
+        sha256_hex(stamp.to_ascii_lowercase().as_bytes())
     }
 }
 

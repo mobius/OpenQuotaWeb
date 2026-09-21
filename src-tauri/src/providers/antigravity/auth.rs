@@ -351,8 +351,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        credential_fingerprint, credential_state_is_actionable, extract_token, AccessTokenCache,
-        AntigravityToken,
+        credential_fingerprint, credential_state_is_actionable, dedup_candidates, extract_token,
+        AccessTokenCache, AntigravityToken, AntigravityTokenCandidate,
     };
     use crate::providers::antigravity::AntigravityError;
 
@@ -465,6 +465,42 @@ mod tests {
         fs::write(&path, b"{not-json").unwrap();
         assert!(cache.load(Some("refresh"), now).is_none());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn token_candidates_deduplicate_on_refresh_token() {
+        let mut candidates = vec![
+            AntigravityTokenCandidate {
+                account: "antigravity".into(),
+                token: AntigravityToken {
+                    access_token: Some("access-a".into()),
+                    refresh_token: Some("refresh-a".into()),
+                    expiry: None,
+                },
+            },
+            AntigravityTokenCandidate {
+                account: "second".into(),
+                token: AntigravityToken {
+                    access_token: Some("access-b".into()),
+                    refresh_token: Some("refresh-a".into()),
+                    expiry: None,
+                },
+            },
+            AntigravityTokenCandidate {
+                account: "third".into(),
+                token: AntigravityToken {
+                    access_token: Some("access-c".into()),
+                    refresh_token: Some("refresh-c".into()),
+                    expiry: None,
+                },
+            },
+        ];
+
+        dedup_candidates(&mut candidates);
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].account, "antigravity");
+        assert_eq!(candidates[1].account, "third");
     }
 
     #[cfg(unix)]

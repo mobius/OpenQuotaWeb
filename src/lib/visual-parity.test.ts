@@ -85,6 +85,20 @@ describe('native visual contract', () => {
     expect(account.container.innerHTML).toBe(cursor.container.innerHTML);
   });
 
+  it('reuses the Grok mark for Grok account cards', () => {
+    const grok = render(ProviderIcon, { providerId: 'grok' });
+    const account = render(ProviderIcon, { providerId: 'grok@1234abcd' });
+
+    expect(account.container.innerHTML).toBe(grok.container.innerHTML);
+  });
+
+  it('reuses the Google mark for Antigravity account cards', () => {
+    const antigravity = render(ProviderIcon, { providerId: 'antigravity' });
+    const account = render(ProviderIcon, { providerId: 'antigravity@1234abcd' });
+
+    expect(account.container.innerHTML).toBe(antigravity.container.innerHTML);
+  });
+
   it('uses the shared hover dwell and grace timing for Usage Trend details', async () => {
     vi.useFakeTimers();
     const today = new Date();

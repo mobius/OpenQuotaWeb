@@ -136,23 +136,6 @@ pub struct GrokProvider {
 }
 
 impl GrokProvider {
-    pub(crate) fn new(
-        storage: Arc<Storage>,
-        pricing: Arc<PricingStore>,
-    ) -> Result<Self, GrokError> {
-        let account_identity = GrokAuthStore::new()
-            .load_candidates()
-            .ok()
-            .and_then(|states| states.into_iter().next())
-            .map(|state| state.account_identity());
-        Self::new_scoped(
-            storage,
-            pricing,
-            definition(),
-            account_identity.map(|identity| account_identity_key(&identity)),
-        )
-    }
-
     fn new_scoped(
         storage: Arc<Storage>,
         pricing: Arc<PricingStore>,
@@ -426,17 +409,40 @@ fn discover_additional_accounts(primary_identity: Option<&str>) -> Result<Vec<St
         .into_iter()
         .map(|state| account_identity_key(&state.account_identity()))
         .collect::<Vec<_>>();
-    let mut identities = identities;
+    Ok(additional_account_identities(identities, primary_identity))
+}
+
+fn additional_account_identities(
+    mut identities: Vec<String>,
+    primary_identity: Option<&str>,
+) -> Vec<String> {
     identities.sort();
     identities.dedup();
     if let Some(primary_identity) = primary_identity {
         identities.retain(|identity| identity != primary_identity);
-        return Ok(identities);
+        return identities;
     }
     if identities.len() <= 1 {
-        return Ok(Vec::new());
+        return Vec::new();
     }
-    Ok(identities.into_iter().skip(1).collect())
+    identities.into_iter().skip(1).collect()
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::additional_account_identities;
+
+    #[test]
+    fn additional_accounts_remove_primary_and_duplicates() {
+        let identities = vec![
+            "cccc".to_owned(),
+            "aaaa".to_owned(),
+            "aaaa".to_owned(),
+            "bbbb".to_owned(),
+        ];
+        let additional = additional_account_identities(identities, Some("bbbb"));
+        assert_eq!(additional, vec!["aaaa".to_owned(), "cccc".to_owned()]);
+    }
 }
 
 #[cfg(test)]
