@@ -3,6 +3,8 @@ pub mod client;
 pub mod csv;
 pub mod mapper;
 
+#[cfg(any(feature = "desktop", feature = "web", test))]
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::{Days, Local, TimeZone, Utc};
@@ -10,6 +12,8 @@ use reqwest::StatusCode;
 use serde_json::Value;
 use thiserror::Error;
 
+#[cfg(any(feature = "desktop", feature = "web", test))]
+use crate::hashing::sha256_hex;
 use crate::{
     models::{
         MetricDefinition, MetricSection, ProviderDefinition, ProviderLink, ProviderSnapshot,
@@ -29,11 +33,15 @@ use self::{
 };
 
 pub(crate) fn definition() -> ProviderDefinition {
+    definition_for("cursor", "Cursor", true)
+}
+
+fn definition_for(id: &str, display_name: &str, fallback_enabled: bool) -> ProviderDefinition {
     ProviderDefinition {
-        id: "cursor".into(),
-        display_name: "Cursor".into(),
+        id: id.into(),
+        display_name: display_name.into(),
         short_name: "Cu".into(),
-        fallback_enabled: true,
+        fallback_enabled,
         local_usage_source_note: Some("From your Cursor usage export".into()),
         links: vec![
             ProviderLink::new("Status", "https://status.cursor.com/"),
@@ -125,6 +133,87 @@ pub(crate) fn definition() -> ProviderDefinition {
     }
 }
 
+#[cfg(any(feature = "desktop", feature = "web", test))]
+pub(crate) fn runtimes(
+    pricing: Arc<PricingStore>,
+) -> Result<Vec<Arc<dyn crate::providers::UsageProvider>>, CursorError> {
+    let mut discovered = discover_accounts();
+    if discovered.is_empty() {
+        return Ok(vec![
+            Arc::new(CursorProvider::new(pricing)?) as Arc<dyn crate::providers::UsageProvider>
+        ]);
+    }
+    discovered.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
+    discovered
+        .into_iter()
+        .enumerate()
+        .map(|(index, account)| {
+            CursorProvider::new_scoped(
+                pricing.clone(),
+                definition_for(
+                    &account.provider_id,
+                    &format!(
+                        "Cursor — {}",
+                        account.provider_id.trim_start_matches("cursor@")
+                    ),
+                    index == 0,
+                ),
+                Some(account.auth_source),
+                Some(account.identity),
+            )
+            .map(|provider| Arc::new(provider) as Arc<dyn crate::providers::UsageProvider>)
+        })
+        .collect()
+}
+
+#[cfg(any(feature = "desktop", feature = "web", test))]
+#[derive(Debug, Clone)]
+struct CursorDiscoveredAccount {
+    provider_id: String,
+    identity: String,
+    auth_source: auth::CursorAuthSource,
+}
+
+#[cfg(any(feature = "desktop", feature = "web", test))]
+fn discover_accounts() -> Vec<CursorDiscoveredAccount> {
+    let mut occupied = HashSet::new();
+    auth::discover_sqlite_auth_states()
+        .into_iter()
+        .filter_map(|auth| {
+            let auth::CursorAuthSource::Sqlite(path) = &auth.source else {
+                return None;
+            };
+            let identity_stamp = auth::token_subject(auth.access_token.as_deref())
+                .or_else(|| auth::token_subject(auth.refresh_token.as_deref()))
+                .unwrap_or_else(|| path.to_string_lossy().to_string());
+            let identity = sha256_hex(identity_stamp.to_ascii_lowercase().as_bytes());
+            let provider_id = allocate_account_id(&identity, &occupied);
+            occupied.insert(provider_id.clone());
+            Some(CursorDiscoveredAccount {
+                provider_id,
+                identity,
+                auth_source: auth.source,
+            })
+        })
+        .collect()
+}
+
+#[cfg(any(feature = "desktop", feature = "web", test))]
+fn allocate_account_id(identity_hash: &str, occupied: &HashSet<String>) -> String {
+    for salt in 0_u64.. {
+        let stamp = if salt == 0 {
+            identity_hash.to_owned()
+        } else {
+            sha256_hex(format!("{identity_hash}:{salt}").as_bytes())
+        };
+        let candidate = format!("cursor@{}", &stamp[..8]);
+        if !occupied.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("an account ID is always available")
+}
+
 #[derive(Debug, Error)]
 pub enum CursorError {
     #[error("Not logged in. Sign in via Cursor app or run `agent login`.")]
@@ -152,13 +241,28 @@ pub enum CursorError {
 }
 
 pub struct CursorProvider {
+    definition: ProviderDefinition,
+    auth_source: Option<auth::CursorAuthSource>,
+    account_identity: Option<String>,
     pricing: Arc<PricingStore>,
     client: CursorClient,
 }
 
 impl CursorProvider {
     pub fn new(pricing: Arc<PricingStore>) -> Result<Self, CursorError> {
+        Self::new_scoped(pricing, definition(), None, None)
+    }
+
+    fn new_scoped(
+        pricing: Arc<PricingStore>,
+        definition: ProviderDefinition,
+        auth_source: Option<auth::CursorAuthSource>,
+        account_identity: Option<String>,
+    ) -> Result<Self, CursorError> {
         Ok(Self {
+            definition,
+            auth_source,
+            account_identity,
             pricing,
             client: CursorClient::new()?,
         })
@@ -166,7 +270,17 @@ impl CursorProvider {
 
     pub fn refresh(&self) -> Result<ProviderSnapshot, CursorError> {
         let now = Utc::now();
-        let auth = CursorAuthState::load()?.ok_or(CursorError::NotLoggedIn)?;
+        let auth = match &self.auth_source {
+            Some(auth::CursorAuthSource::Sqlite(path)) => {
+                auth::load_sqlite_auth_state(path).ok_or(CursorError::NotLoggedIn)?
+            }
+            Some(source @ auth::CursorAuthSource::Keychain { .. }) => CursorAuthState {
+                access_token: None,
+                refresh_token: None,
+                source: source.clone(),
+            },
+            None => CursorAuthState::load()?.ok_or(CursorError::NotLoggedIn)?,
+        };
         self.refresh_with_auth(auth, now)
     }
 
@@ -204,7 +318,7 @@ impl CursorProvider {
                 message,
             )?;
             let history = self.fetch_usage_history(current_token, now);
-            return Ok(snapshot(mapped, history, Vec::new(), now));
+            return Ok(self.snapshot(mapped, history, Vec::new(), now));
         }
         if PlanUsageFacts::new(&usage).should_try_generic_request_fallback() {
             if let Ok(mapped) = self.request_based_result(
@@ -212,7 +326,7 @@ impl CursorProvider {
                 plan_name.as_deref(),
                 "Cursor request-based usage data unavailable. Try again later.",
             ) {
-                return Ok(snapshot(mapped, UsageHistory::default(), Vec::new(), now));
+                return Ok(self.snapshot(mapped, UsageHistory::default(), Vec::new(), now));
             }
         }
 
@@ -236,7 +350,27 @@ impl CursorProvider {
             stripe_balance_cents(stripe.as_ref()),
         )?;
         let history = self.fetch_usage_history(current_token, now);
-        Ok(snapshot(mapped, history, Vec::new(), now))
+        Ok(self.snapshot(mapped, history, Vec::new(), now))
+    }
+
+    fn snapshot(
+        &self,
+        mapped: mapper::CursorMappedUsage,
+        usage: UsageHistory,
+        warnings: Vec<String>,
+        refreshed_at: chrono::DateTime<Utc>,
+    ) -> ProviderSnapshot {
+        ProviderSnapshot {
+            provider_id: self.definition.id.clone(),
+            plan: mapped.plan,
+            quotas: mapped.quotas,
+            value_metrics: mapped.value_metrics,
+            status_metrics: Vec::new(),
+            notices: Vec::new(),
+            usage,
+            warnings,
+            refreshed_at,
+        }
     }
 
     fn fetch_usage_with_retry(
@@ -434,25 +568,6 @@ impl CursorProvider {
     }
 }
 
-fn snapshot(
-    mapped: mapper::CursorMappedUsage,
-    usage: UsageHistory,
-    warnings: Vec<String>,
-    refreshed_at: chrono::DateTime<Utc>,
-) -> ProviderSnapshot {
-    ProviderSnapshot {
-        provider_id: "cursor".into(),
-        plan: mapped.plan,
-        quotas: mapped.quotas,
-        value_metrics: mapped.value_metrics,
-        status_metrics: Vec::new(),
-        notices: Vec::new(),
-        usage,
-        warnings,
-        refreshed_at,
-    }
-}
-
 fn require_success(response: &CursorResponse) -> Result<(), CursorError> {
     if response.status.is_success() {
         Ok(())
@@ -482,33 +597,73 @@ fn should_logout(value: Option<&Value>) -> bool {
 
 impl crate::providers::UsageProvider for CursorProvider {
     fn definition(&self) -> ProviderDefinition {
-        definition()
+        self.definition.clone()
     }
 
     fn has_local_credentials(&self) -> bool {
-        CursorAuthState::has_local_credentials()
+        match &self.auth_source {
+            Some(auth::CursorAuthSource::Sqlite(path)) => {
+                auth::load_sqlite_auth_state(path).is_some()
+            }
+            Some(auth::CursorAuthSource::Keychain { .. }) => false,
+            None => CursorAuthState::has_local_credentials(),
+        }
+    }
+
+    fn cache_identity(&self) -> crate::providers::CacheIdentity<'_> {
+        self.account_identity
+            .as_deref()
+            .map(crate::providers::CacheIdentity::Resolved)
+            .unwrap_or(crate::providers::CacheIdentity::Unresolved)
+    }
+
+    fn supports_account_names(&self) -> bool {
+        true
+    }
+
+    fn account_identity(&self) -> Option<&str> {
+        self.account_identity.as_deref()
     }
 
     fn refresh(&self) -> Result<ProviderSnapshot, crate::providers::ProviderError> {
-        CursorProvider::refresh(self).map_err(|error| {
-            use crate::models::ProviderErrorKind as Kind;
-            let kind = match error {
-                CursorError::NotLoggedIn
-                | CursorError::SessionExpired
-                | CursorError::TokenExpired => Kind::Authentication,
-                CursorError::AuthWrite => Kind::CredentialStorage,
-                CursorError::RequestFailed(429) => Kind::RateLimited,
-                CursorError::ConnectionFailed
-                | CursorError::RequestFailed(_)
-                | CursorError::UsageAfterRefreshFailed
-                | CursorError::RequestBasedUnavailable(_) => Kind::Network,
-                CursorError::InvalidResponse
-                | CursorError::TotalUsageLimitMissing
-                | CursorError::NoActiveSubscription => Kind::InvalidResponse,
-            };
-            crate::providers::ProviderError::from_display(kind, error)
+        CursorProvider::refresh(self).map_err(provider_error)
+    }
+
+    fn refresh_for_service(
+        &self,
+    ) -> Result<crate::providers::ProviderRefresh, crate::providers::ProviderError> {
+        let snapshot = CursorProvider::refresh(self).map_err(provider_error)?;
+        Ok(crate::providers::ProviderRefresh {
+            snapshot,
+            cache_identity: self.account_identity.clone(),
+            account: self.account_identity.as_ref().map(|identity| {
+                crate::providers::AccountRefresh {
+                    family: "cursor",
+                    provider_id: self.definition.id.clone(),
+                    identity: identity.clone(),
+                }
+            }),
         })
     }
+}
+
+fn provider_error(error: CursorError) -> crate::providers::ProviderError {
+    use crate::models::ProviderErrorKind as Kind;
+    let kind = match error {
+        CursorError::NotLoggedIn | CursorError::SessionExpired | CursorError::TokenExpired => {
+            Kind::Authentication
+        }
+        CursorError::AuthWrite => Kind::CredentialStorage,
+        CursorError::RequestFailed(429) => Kind::RateLimited,
+        CursorError::ConnectionFailed
+        | CursorError::RequestFailed(_)
+        | CursorError::UsageAfterRefreshFailed
+        | CursorError::RequestBasedUnavailable(_) => Kind::Network,
+        CursorError::InvalidResponse
+        | CursorError::TotalUsageLimitMissing
+        | CursorError::NoActiveSubscription => Kind::InvalidResponse,
+    };
+    crate::providers::ProviderError::from_display(kind, error)
 }
 
 #[cfg(test)]
@@ -526,9 +681,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
+        allocate_account_id,
         auth::{CursorAuthSource, CursorAuthState},
         client::{CursorClient, Endpoints},
-        definition, CursorProvider,
+        definition, definition_for, CursorProvider,
     };
     use crate::pricing::PricingStore;
 
@@ -697,6 +853,27 @@ mod tests {
     }
 
     #[test]
+    fn scoped_definition_rewrites_ids_for_cursor_accounts() {
+        let definition = definition_for("cursor@1234abcd", "Cursor — 1234abcd", false);
+        assert_eq!(definition.id, "cursor@1234abcd");
+        assert_eq!(definition.display_name, "Cursor — 1234abcd");
+        assert!(!definition.fallback_enabled);
+        assert!(definition
+            .metrics
+            .iter()
+            .all(|metric| metric.id.starts_with("cursor@1234abcd.")));
+    }
+
+    #[test]
+    fn account_provider_id_uses_cursor_hash_prefix() {
+        let id = allocate_account_id(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(id, "cursor@aaaaaaaa");
+    }
+
+    #[test]
     fn provider_retries_auth_and_keeps_optional_csv_spend_additive() {
         let directory = tempdir().unwrap();
         let database = directory.path().join("state.vscdb");
@@ -722,6 +899,9 @@ mod tests {
         };
         let pricing = Arc::new(PricingStore::new(directory.path().join("pricing")).unwrap());
         let provider = CursorProvider {
+            definition: definition(),
+            auth_source: None,
+            account_identity: None,
             pricing,
             client: CursorClient::with_endpoints(endpoints).unwrap(),
         };
@@ -776,6 +956,9 @@ mod tests {
         };
         let pricing = Arc::new(PricingStore::new(directory.path().join("pricing")).unwrap());
         let provider = CursorProvider {
+            definition: definition(),
+            auth_source: None,
+            account_identity: None,
             pricing,
             client: CursorClient::with_endpoints(endpoints).unwrap(),
         };
@@ -809,6 +992,9 @@ mod tests {
         };
         let pricing = Arc::new(PricingStore::new(directory.path().join("pricing")).unwrap());
         let provider = CursorProvider {
+            definition: definition(),
+            auth_source: None,
+            account_identity: None,
             pricing,
             client: CursorClient::with_endpoints(endpoints).unwrap(),
         };

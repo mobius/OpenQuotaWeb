@@ -3,8 +3,8 @@ use std::sync::Arc;
 use crate::{
     pricing::PricingStore,
     providers::{
-        antigravity::AntigravityProvider, claude, codex::reset_claim::CodexResetClaimService,
-        codex::CodexProvider, copilot::CopilotProvider, cursor::CursorProvider,
+        antigravity::AntigravityProvider, claude, codex,
+        codex::reset_claim::CodexResetClaimService, copilot::CopilotProvider, cursor,
         deepseek::DeepSeekProvider, devin::DevinProvider, grok::GrokProvider, kimi::KimiProvider,
         minimax::MiniMaxProvider, opencode::OpenCodeProvider, openrouter::OpenRouterProvider,
         zai::ZaiProvider, ProviderRegistry, UsageProvider,
@@ -43,16 +43,20 @@ pub fn initialize() -> Result<AppStateInit, Box<dyn std::error::Error>> {
 
     let pricing = Arc::new(PricingStore::new(app_data_dir.join("pricing"))?);
     let mut providers = claude::runtimes(storage.clone(), pricing.clone())?;
+    providers.extend(codex::CodexProvider::runtimes(
+        storage.clone(),
+        pricing.clone(),
+    )?);
+    providers.extend(cursor::runtimes(pricing.clone())?);
+    providers.extend(AntigravityProvider::runtimes(
+        storage.clone(),
+        app_data_dir.join("antigravity").join("auth.json"),
+    )?);
+    providers.extend(GrokProvider::runtimes(storage.clone(), pricing.clone())?);
     providers.extend(vec![
-        Arc::new(CodexProvider::new(storage.clone(), pricing.clone())?) as Arc<dyn UsageProvider>,
-        Arc::new(CursorProvider::new(pricing.clone())?) as Arc<dyn UsageProvider>,
         Arc::new(DeepSeekProvider::new()?) as Arc<dyn UsageProvider>,
-        Arc::new(AntigravityProvider::new(
-            app_data_dir.join("antigravity").join("auth.json"),
-        )?) as Arc<dyn UsageProvider>,
         Arc::new(CopilotProvider::new()?) as Arc<dyn UsageProvider>,
         Arc::new(DevinProvider::new()?) as Arc<dyn UsageProvider>,
-        Arc::new(GrokProvider::new(storage.clone(), pricing.clone())?) as Arc<dyn UsageProvider>,
         Arc::new(OpenCodeProvider::new(pricing.clone())) as Arc<dyn UsageProvider>,
         Arc::new(OpenRouterProvider::new()?) as Arc<dyn UsageProvider>,
         Arc::new(ZaiProvider::new()?) as Arc<dyn UsageProvider>,

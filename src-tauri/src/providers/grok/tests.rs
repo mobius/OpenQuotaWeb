@@ -12,8 +12,8 @@ use chrono::{TimeZone, Utc};
 use tempfile::TempDir;
 
 use super::{
-    auth::GrokAuthStore, client::GrokClient, definition, local_usage::GrokLogUsageScanner,
-    GrokProvider,
+    account_identity_key, auth::GrokAuthStore, client::GrokClient, definition, definition_for,
+    local_usage::GrokLogUsageScanner, GrokProvider,
 };
 use crate::{
     models::{ProviderErrorKind, ProviderSnapshot, StatusTone, UsageHistory, UsagePeriod},
@@ -57,6 +57,8 @@ fn build_provider(
         GrokProvider::with_dependencies(
             storage.clone(),
             pricing,
+            definition(),
+            None,
             GrokAuthStore::for_path(auth_path),
             client,
             GrokLogUsageScanner::for_path(log_path),
@@ -101,6 +103,16 @@ fn definition_matches_the_complete_default_layout() {
         crate::models::MetricSection::OnDemand
     );
     assert!(!extra.default_pinned);
+}
+
+#[test]
+fn scoped_definition_rewrites_metric_ids_for_account_provider_ids() {
+    let definition = definition_for("grok@1234abcd", "Grok — 1234abcd", false);
+    assert_eq!(definition.id, "grok@1234abcd");
+    assert!(definition
+        .metrics
+        .iter()
+        .all(|metric| metric.id.starts_with("grok@1234abcd.")));
 }
 
 #[test]
@@ -241,6 +253,78 @@ fn expired_first_account_does_not_hide_a_usable_second_account() {
         header(&request, "authorization").as_deref(),
         Some("Bearer working")
     );
+    server.finish();
+}
+
+#[test]
+fn scoped_runtime_refreshes_only_the_matching_account() {
+    let server = TestServer::new(3, |request| {
+        if request.starts_with("GET /credits ") {
+            (200, CREDITS.into())
+        } else if request.starts_with("POST /token ") {
+            (
+                200,
+                r#"{
+                  "access_token":"new-token",
+                  "refresh_token":"new-refresh",
+                  "id_token":"new-id",
+                  "expires_in":3600
+                }"#
+                .into(),
+            )
+        } else if request.starts_with("GET /settings ") {
+            (200, "{}".into())
+        } else {
+            (404, "{}".into())
+        }
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let auth = r#"{
+      "account-a": {
+        "key": "token-a",
+        "refresh_token": "refresh-a",
+        "expires_at": "2026-01-01T00:00:00.000Z"
+      },
+      "https://auth.x.ai::client-b": {
+        "key": "token-b",
+        "refresh_token": "refresh-b",
+        "expires_at": "2026-01-01T00:00:00.000Z"
+      }
+    }"#;
+    let auth_path = directory.path().join("auth.json");
+    fs::write(&auth_path, auth).unwrap();
+    let store = GrokAuthStore::for_path(auth_path.clone());
+    let scoped_identity = store
+        .load_candidates()
+        .unwrap()
+        .into_iter()
+        .find(|state| state.entry_key == "https://auth.x.ai::client-b")
+        .map(|state| account_identity_key(&state.account_identity()))
+        .unwrap();
+    let provider_id = format!("grok@{}", &scoped_identity[..8]);
+    let storage = Arc::new(Storage::open(&directory.path().join("openquota.db")).unwrap());
+    let pricing = Arc::new(
+        PricingStore::new_without_refresh_for_test(directory.path().join("pricing")).unwrap(),
+    );
+    let provider = GrokProvider::with_dependencies(
+        storage,
+        pricing,
+        definition_for(&provider_id, "Grok — account-b", false),
+        Some(scoped_identity),
+        GrokAuthStore::for_path(auth_path),
+        server.client(),
+        GrokLogUsageScanner::for_path(directory.path().join("missing-log.jsonl")),
+        now(),
+    );
+
+    let snapshot = provider.refresh_inner().unwrap();
+    assert_eq!(snapshot.provider_id, provider_id);
+    let request = server
+        .requests()
+        .into_iter()
+        .find(|request| request.starts_with("POST /token "))
+        .unwrap();
+    assert!(request.contains("client_id=client-b"));
     server.finish();
 }
 

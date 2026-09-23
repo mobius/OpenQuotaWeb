@@ -50,19 +50,26 @@ docker compose logs -f   # server logs
 
 Copy `.env.example` to `.env` and edit it. **Never commit the populated `.env`.**
 
-| Variable                      | Default   | Description                     |
-| ----------------------------- | --------- | ------------------------------- |
-| `OPENQUOTA_AUTH_USER`         | _(empty)_ | HTTP Basic username (optional). |
-| `OPENQUOTA_AUTH_PASSWORD`     | _(empty)_ | HTTP Basic password (optional). |
-| `OPENROUTER_API_KEY`          | _(empty)_ | OpenRouter API key.             |
-| `DEEPSEEK_API_KEY`            | _(empty)_ | DeepSeek API key.               |
-| `ZAI_API_KEY` / `GLM_API_KEY` | _(empty)_ | Z.ai API key.                   |
-| `KIMI_API_KEY`                | _(empty)_ | Kimi API key.                   |
-| `MINIMAX_API_KEY`             | _(empty)_ | MiniMax API key.                |
+| Variable                      | Default   | Description                                 |
+| ----------------------------- | --------- | ------------------------------------------- |
+| `OPENQUOTA_AUTH_USER`         | _(empty)_ | HTTP Basic username (optional).             |
+| `OPENQUOTA_AUTH_PASSWORD`     | _(empty)_ | HTTP Basic password (optional).             |
+| `OPENROUTER_API_KEY`          | _(empty)_ | OpenRouter API key.                         |
+| `DEEPSEEK_API_KEY`            | _(empty)_ | DeepSeek API key.                           |
+| `ZAI_API_KEY` / `GLM_API_KEY` | _(empty)_ | Z.ai API key.                               |
+| `KIMI_API_KEY`                | _(empty)_ | Kimi API key.                               |
+| `MINIMAX_API_KEY`             | _(empty)_ | MiniMax API key.                            |
+| `OPENQUOTA_CURSOR_STATE_DBS`  | _(auto)_  | Comma-separated Cursor `state.vscdb` paths. |
+| `OPENQUOTA_CURSOR_STATE_DB`   | _(auto)_  | Single Cursor `state.vscdb` path (legacy).  |
 
 If you set both `OPENQUOTA_AUTH_USER` and `OPENQUOTA_AUTH_PASSWORD`, the whole
 dashboard is protected with HTTP Basic (`/api/health` stays open for the
 healthcheck). The browser remembers the credentials after the first prompt.
+
+For Cursor account discovery, OpenQuota auto-detects common `state.vscdb`
+locations. Set `OPENQUOTA_CURSOR_STATE_DBS` when you want explicit control over
+multiple Cursor accounts (for example:
+`/path/a/state.vscdb,/path/b/state.vscdb`).
 
 Server variables (usually no need to change):
 

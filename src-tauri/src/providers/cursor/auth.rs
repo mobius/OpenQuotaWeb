@@ -64,6 +64,15 @@ impl CursorAuthState {
     }
 }
 
+pub(crate) fn load_sqlite_auth_state(path: &Path) -> Option<CursorAuthState> {
+    load_sqlite_auth(path).map(|(auth, _)| auth)
+}
+
+#[cfg(any(feature = "desktop", feature = "web", test))]
+pub(crate) fn discover_sqlite_auth_states() -> Vec<CursorAuthState> {
+    discover_sqlite_auth_states_in(state_database_paths())
+}
+
 fn select_auth_state(
     sqlite: Option<(CursorAuthState, Option<String>)>,
     keychain: Option<CursorAuthState>,
@@ -104,6 +113,14 @@ fn load_sqlite_auth(path: &Path) -> Option<(CursorAuthState, Option<String>)> {
         },
         membership,
     ))
+}
+
+#[cfg(any(feature = "desktop", feature = "web", test))]
+fn discover_sqlite_auth_states_in(paths: Vec<PathBuf>) -> Vec<CursorAuthState> {
+    paths
+        .into_iter()
+        .filter_map(|path| load_sqlite_auth_state(&path))
+        .collect()
 }
 
 fn read_state_value(path: &Path, key: &str) -> Option<String> {
@@ -201,8 +218,15 @@ fn non_empty(value: impl AsRef<str>) -> Option<String> {
 }
 
 fn state_database_paths() -> Vec<PathBuf> {
+    let mut explicit = std::env::var("OPENQUOTA_CURSOR_STATE_DBS")
+        .ok()
+        .map(|value| parse_state_database_list(&value))
+        .unwrap_or_default();
     if let Some(path) = std::env::var_os("OPENQUOTA_CURSOR_STATE_DB").map(PathBuf::from) {
-        return vec![path];
+        explicit.push(path);
+    }
+    if !explicit.is_empty() {
+        return dedup_paths(explicit);
     }
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -217,7 +241,24 @@ fn state_database_paths() -> Vec<PathBuf> {
         paths.push(config.join("Cursor/User/globalStorage/state.vscdb"));
     }
     paths.push(home.join(".config/Cursor/User/globalStorage/state.vscdb"));
+    dedup_paths(paths)
+}
+
+fn parse_state_database_list(value: &str) -> Vec<PathBuf> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
     paths
+        .into_iter()
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -316,5 +357,58 @@ mod tests {
         assert!(auth.needs_refresh(now));
         auth.access_token = Some(jwt("auth0|user", (now + Duration::minutes(6)).timestamp()));
         assert!(!auth.needs_refresh(now));
+    }
+
+    #[test]
+    fn parses_multiple_explicit_state_database_paths() {
+        assert_eq!(
+            parse_state_database_list(" /tmp/a.vscdb, ,/tmp/b.vscdb ,"),
+            vec![PathBuf::from("/tmp/a.vscdb"), PathBuf::from("/tmp/b.vscdb")]
+        );
+    }
+
+    #[test]
+    fn discovers_sqlite_auth_from_multiple_paths() {
+        let directory = tempdir().unwrap();
+        let first = directory.path().join("first.vscdb");
+        let second = directory.path().join("second.vscdb");
+        let third = directory.path().join("third.vscdb");
+        for (path, access, refresh) in [
+            (&first, Some("first-token"), None),
+            (&second, None, Some("second-refresh")),
+            (&third, None, None),
+        ] {
+            let connection = Connection::open(path).unwrap();
+            connection
+                .execute(
+                    "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)",
+                    [],
+                )
+                .unwrap();
+            if let Some(access) = access {
+                connection
+                    .execute(
+                        "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+                        (ACCESS_TOKEN_KEY, access),
+                    )
+                    .unwrap();
+            }
+            if let Some(refresh) = refresh {
+                connection
+                    .execute(
+                        "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+                        (REFRESH_TOKEN_KEY, refresh),
+                    )
+                    .unwrap();
+            }
+        }
+
+        let discovered = discover_sqlite_auth_states_in(vec![first, second, third]);
+        assert_eq!(discovered.len(), 2);
+        assert_eq!(discovered[0].access_token.as_deref(), Some("first-token"));
+        assert_eq!(
+            discovered[1].refresh_token.as_deref(),
+            Some("second-refresh")
+        );
     }
 }

@@ -3,7 +3,7 @@ mod client;
 mod discovery;
 mod mapper;
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -12,9 +12,10 @@ use thiserror::Error;
 use crate::models::{
     MetricDefinition, MetricSection, ProviderDefinition, ProviderSnapshot, UsageHistory,
 };
+use crate::{hashing::sha256_hex, storage::Storage};
 
 use self::{
-    auth::{load_token, AccessTokenCache},
+    auth::{load_token, load_token_candidates, load_token_for_account, AccessTokenCache},
     client::{AntigravityClient, CloudOutcome, CloudUserAgent, RefreshOutcome},
     discovery::discover,
     mapper::{
@@ -29,11 +30,15 @@ const LOAD_CODE_ASSIST_PATH: &str = "/v1internal:loadCodeAssist";
 const RETRIEVE_QUOTA_PATH: &str = "/v1internal:retrieveUserQuota";
 
 pub(crate) fn definition() -> ProviderDefinition {
-    ProviderDefinition {
-        id: "antigravity".into(),
-        display_name: "Antigravity".into(),
+    definition_for("antigravity", "Antigravity", false)
+}
+
+fn definition_for(id: &str, display_name: &str, fallback_enabled: bool) -> ProviderDefinition {
+    let mut definition = ProviderDefinition {
+        id: id.into(),
+        display_name: display_name.into(),
         short_name: "A".into(),
-        fallback_enabled: false,
+        fallback_enabled,
         local_usage_source_note: None,
         links: vec![],
         metrics: vec![
@@ -78,7 +83,16 @@ pub(crate) fn definition() -> ProviderDefinition {
                 "CW",
             ),
         ],
+    };
+    if id != "antigravity" {
+        for metric in &mut definition.metrics {
+            if let Some(suffix) = metric.id.strip_prefix("antigravity.") {
+                metric.id = format!("{id}.{suffix}");
+            }
+            metric.default_pinned = false;
+        }
     }
+    definition
 }
 
 #[derive(Debug, Error)]
@@ -96,16 +110,62 @@ pub enum AntigravityError {
 }
 
 pub struct AntigravityProvider {
+    definition: ProviderDefinition,
+    account_identity: Option<String>,
+    keychain_account: Option<String>,
     client: AntigravityClient,
     access_token_cache: AccessTokenCache,
 }
 
 impl AntigravityProvider {
     pub fn new(cache_path: PathBuf) -> Result<Self, AntigravityError> {
+        Self::new_scoped(cache_path, definition(), None, None)
+    }
+
+    fn new_scoped(
+        cache_path: PathBuf,
+        definition: ProviderDefinition,
+        account_identity: Option<String>,
+        keychain_account: Option<String>,
+    ) -> Result<Self, AntigravityError> {
         Ok(Self {
+            definition,
+            account_identity,
+            keychain_account,
             client: AntigravityClient::new()?,
             access_token_cache: AccessTokenCache::new(cache_path),
         })
+    }
+
+    pub(crate) fn runtimes(
+        storage: Arc<Storage>,
+        cache_path: PathBuf,
+    ) -> Result<Vec<Arc<dyn crate::providers::UsageProvider>>, AntigravityError> {
+        let discovered = discovered_accounts()?;
+        let primary = discovered.first().map(|(identity, _, _)| identity.clone());
+        if let Some(identity) = primary.as_deref() {
+            crate::providers::remember_default_account(&storage, "antigravity", identity)
+                .map_err(|_| AntigravityError::Unavailable)?;
+        }
+        let mut runtimes = vec![Arc::new(Self::new_scoped(
+            cache_path.clone(),
+            definition(),
+            primary.clone(),
+            discovered.first().map(|(_, account, _)| account.clone()),
+        )?) as Arc<dyn crate::providers::UsageProvider>];
+        for (identity, account, display) in discovered.into_iter().skip(1) {
+            let provider_id = format!("antigravity@{}", &identity[..8]);
+            runtimes.push(Arc::new(Self::new_scoped(
+                cache_path.with_file_name(format!(
+                    "auth-{}.json",
+                    &provider_id["antigravity@".len()..]
+                )),
+                definition_for(&provider_id, &format!("Google — {display}"), false),
+                Some(identity),
+                Some(account),
+            )?) as Arc<dyn crate::providers::UsageProvider>);
+        }
+        Ok(runtimes)
     }
 
     fn refresh_inner(&self) -> Result<ProviderSnapshot, AntigravityError> {
@@ -120,7 +180,7 @@ impl AntigravityProvider {
                         .call_language_server(&server, "GetUserStatus")
                         .as_ref()
                         .and_then(parse_plan);
-                    return Ok(snapshot(plan, quotas));
+                    return Ok(snapshot(self.definition.id.as_str(), plan, quotas));
                 }
             }
 
@@ -128,7 +188,7 @@ impl AntigravityProvider {
                 if let Some((plan, configs)) = parse_user_status(&status) {
                     let quotas = build_legacy_quotas(configs);
                     if !quotas.is_empty() {
-                        return Ok(snapshot(plan, quotas));
+                        return Ok(snapshot(self.definition.id.as_str(), plan, quotas));
                     }
                 }
                 if let Some(configs) = self
@@ -139,13 +199,13 @@ impl AntigravityProvider {
                 {
                     let quotas = build_legacy_quotas(configs);
                     if !quotas.is_empty() {
-                        return Ok(snapshot(None, quotas));
+                        return Ok(snapshot(self.definition.id.as_str(), None, quotas));
                     }
                 }
             }
         }
 
-        let keychain = match load_token()? {
+        let keychain = match self.load_keychain_token()? {
             Some(token) => token,
             None => {
                 self.access_token_cache.discard();
@@ -220,7 +280,11 @@ impl AntigravityProvider {
         ) {
             CloudOutcome::Ok(value) => {
                 if let Some(quotas) = parse_quota_summary(&value) {
-                    return Ok(snapshot(self.load_remote_plan(token), quotas));
+                    return Ok(snapshot(
+                        self.definition.id.as_str(),
+                        self.load_remote_plan(token),
+                        quotas,
+                    ));
                 }
             }
             CloudOutcome::AuthFailed => return Err(AntigravityError::AuthExpired),
@@ -236,7 +300,11 @@ impl AntigravityProvider {
             CloudOutcome::Ok(value) => {
                 let quotas = build_legacy_quotas(parse_cloud_models(&value));
                 if !quotas.is_empty() {
-                    return Ok(snapshot(self.load_remote_plan(token), quotas));
+                    return Ok(snapshot(
+                        self.definition.id.as_str(),
+                        self.load_remote_plan(token),
+                        quotas,
+                    ));
                 }
             }
             CloudOutcome::AuthFailed => return Err(AntigravityError::AuthExpired),
@@ -277,7 +345,7 @@ impl AntigravityProvider {
             CloudOutcome::Ok(value) => {
                 let quotas = build_legacy_quotas(parse_quota_buckets(&value));
                 if !quotas.is_empty() {
-                    return Ok(snapshot(plan, quotas));
+                    return Ok(snapshot(self.definition.id.as_str(), plan, quotas));
                 }
             }
             CloudOutcome::AuthFailed => return Err(AntigravityError::AuthExpired),
@@ -294,6 +362,13 @@ impl AntigravityProvider {
             CloudOutcome::Ok(value) => remote_plan(&value),
             _ => None,
         }
+    }
+
+    fn load_keychain_token(&self) -> Result<Option<auth::AntigravityToken>, AntigravityError> {
+        if let Some(account) = self.keychain_account.as_deref() {
+            return load_token_for_account(account);
+        }
+        load_token()
     }
 }
 
@@ -364,9 +439,53 @@ fn remote_plan(value: &Value) -> Option<String> {
     Some(raw.into())
 }
 
-fn snapshot(plan: Option<String>, quotas: Vec<crate::models::QuotaWindow>) -> ProviderSnapshot {
+fn discovered_accounts() -> Result<Vec<(String, String, String)>, AntigravityError> {
+    Ok(discovered_accounts_from_candidates(load_token_candidates()?))
+}
+
+fn discovered_accounts_from_candidates(
+    candidates: Vec<auth::AntigravityTokenCandidate>,
+) -> Vec<(String, String, String)> {
+    let mut accounts = candidates
+        .into_iter()
+        .filter_map(|candidate| {
+            let identity_stamp = candidate
+                .token
+                .refresh_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    candidate
+                        .token
+                        .access_token
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                })?;
+            let identity = sha256_hex(identity_stamp.as_bytes());
+            let display = if candidate.account.is_empty() {
+                identity[..8].to_owned()
+            } else {
+                candidate.account.clone()
+            };
+            Some((identity, candidate.account, display))
+        })
+        .collect::<Vec<_>>();
+    accounts.sort_by(|left, right| left.0.cmp(&right.0));
+    accounts.dedup_by(|left, right| left.0 == right.0);
+    accounts
+}
+
+fn snapshot(
+    provider_id: &str,
+    plan: Option<String>,
+    quotas: Vec<crate::models::QuotaWindow>,
+) -> ProviderSnapshot {
     ProviderSnapshot {
-        provider_id: "antigravity".into(),
+        provider_id: provider_id.into(),
         plan,
         quotas,
         value_metrics: Vec::new(),
@@ -387,7 +506,7 @@ fn has_refresh_source(
 
 impl crate::providers::UsageProvider for AntigravityProvider {
     fn definition(&self) -> ProviderDefinition {
-        definition()
+        self.definition.clone()
     }
 
     fn has_local_credentials(&self) -> bool {
@@ -408,6 +527,39 @@ impl crate::providers::UsageProvider for AntigravityProvider {
             crate::providers::ProviderError::from_display(kind, error)
         })
     }
+
+    fn cache_identity(&self) -> crate::providers::CacheIdentity<'_> {
+        self.account_identity
+            .as_deref()
+            .map(crate::providers::CacheIdentity::Resolved)
+            .unwrap_or(crate::providers::CacheIdentity::Unresolved)
+    }
+
+    fn supports_account_names(&self) -> bool {
+        true
+    }
+
+    fn account_identity(&self) -> Option<&str> {
+        self.account_identity.as_deref()
+    }
+
+    fn refresh_for_service(
+        &self,
+    ) -> Result<crate::providers::ProviderRefresh, crate::providers::ProviderError> {
+        let snapshot = self.refresh()?;
+        Ok(crate::providers::ProviderRefresh {
+            snapshot,
+            cache_identity: self.account_identity.clone(),
+            account: self
+                .account_identity
+                .clone()
+                .map(|identity| crate::providers::AccountRefresh {
+                    family: "antigravity",
+                    provider_id: self.definition.id.clone(),
+                    identity,
+                }),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -417,7 +569,8 @@ mod tests {
     use chrono::{Duration, TimeZone, Utc};
 
     use super::{
-        access_token_candidates, auth::AntigravityToken, credential_failure, has_refresh_source,
+        access_token_candidates, auth::{AntigravityToken, AntigravityTokenCandidate},
+        credential_failure, discovered_accounts_from_candidates, has_refresh_source,
         should_refresh_access_token, AntigravityError,
     };
 
@@ -490,5 +643,40 @@ mod tests {
             false
         }));
         assert!(!discovery_called.get());
+    }
+
+    #[test]
+    fn discovered_accounts_are_sorted_and_deduplicated() {
+        let accounts = discovered_accounts_from_candidates(vec![
+            AntigravityTokenCandidate {
+                account: "work".into(),
+                token: AntigravityToken {
+                    access_token: Some("access-b".into()),
+                    refresh_token: Some("refresh-b".into()),
+                    expiry: None,
+                },
+            },
+            AntigravityTokenCandidate {
+                account: "personal".into(),
+                token: AntigravityToken {
+                    access_token: Some("access-a".into()),
+                    refresh_token: Some("refresh-a".into()),
+                    expiry: None,
+                },
+            },
+            AntigravityTokenCandidate {
+                account: "duplicate".into(),
+                token: AntigravityToken {
+                    access_token: Some("access-a2".into()),
+                    refresh_token: Some("refresh-a".into()),
+                    expiry: None,
+                },
+            },
+        ]);
+
+        assert_eq!(accounts.len(), 2);
+        assert!(accounts[0].0 <= accounts[1].0);
+        assert_eq!(accounts[0].2, "personal");
+        assert_eq!(accounts[1].2, "work");
     }
 }

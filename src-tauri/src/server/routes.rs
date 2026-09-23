@@ -188,7 +188,7 @@ fn credential_path(provider_id: &str) -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("/data/home"));
-    match provider_id {
+    match crate::providers::provider_family(provider_id) {
         "codex" => Some(
             std::env::var_os("CODEX_HOME")
                 .map(std::path::PathBuf::from)

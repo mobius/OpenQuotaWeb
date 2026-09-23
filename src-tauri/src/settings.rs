@@ -183,13 +183,15 @@ impl SettingsService {
     }
 
     fn activate_launch_accounts(&self) -> Result<(), StorageError> {
-        let identity = self
-            .registry
-            .cache_identity("codex")
-            .resolved_value()
-            .map(str::to_owned);
-        if let Some(identity) = identity {
-            self.activate_account("codex", "codex", &identity)?;
+        for provider_id in self.registry.observed_account_provider_ids() {
+            let identity = self
+                .registry
+                .runtime(&provider_id)
+                .and_then(|runtime| runtime.account_identity().map(str::to_owned));
+            if let Some(identity) = identity {
+                let family = crate::providers::provider_family(&provider_id);
+                self.activate_account(family, &provider_id, &identity)?;
+            }
         }
         Ok(())
     }

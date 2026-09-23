@@ -14,6 +14,7 @@ use serde_json::{Map, Value};
 use tempfile::NamedTempFile;
 
 use super::GrokError;
+use crate::hashing::sha256_hex;
 
 const DEFAULT_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 const REFRESH_BUFFER_MINUTES: i64 = 5;
@@ -184,6 +185,15 @@ impl GrokAuthStore {
     }
 }
 
+impl GrokAuthState {
+    pub fn account_identity(&self) -> String {
+        let stamp = token_subject(&self.token)
+            .or_else(|| self.entry.id_token.as_deref().and_then(token_subject))
+            .unwrap_or_else(|| self.entry_key.clone());
+        sha256_hex(stamp.to_ascii_lowercase().as_bytes())
+    }
+}
+
 fn set_optional_string(object: &mut Map<String, Value>, key: &str, value: Option<&str>) {
     if let Some(value) = value {
         object.insert(key.to_owned(), Value::String(value.to_owned()));
@@ -240,6 +250,22 @@ pub fn token_expiry(token: &str) -> Option<DateTime<Utc>> {
         .and_then(number)
         .filter(|value| value.is_finite())?;
     DateTime::from_timestamp(seconds as i64, 0)
+}
+
+fn token_subject(token: &str) -> Option<String> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| URL_SAFE.decode(payload))
+        .ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("sub")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("email").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
 }
 
 fn number(value: &Value) -> Option<f64> {
@@ -302,6 +328,7 @@ mod tests {
         assert_eq!(candidates[0].token, "token-a");
         assert_eq!(store.client_id(&candidates[0]), "client-a");
         assert_eq!(store.client_id(&candidates[1]), "client-b");
+        assert_eq!(candidates[0].account_identity().len(), 64);
     }
 
     #[test]

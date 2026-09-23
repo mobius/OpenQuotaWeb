@@ -3,7 +3,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import WebDashboard from './WebDashboard.svelte';
 import { ProviderCatalogIndex } from './metrics';
 import type { AppSettings, ProviderViewState, UsageViewState } from './types';
-import { claudeState, liveState, providerCatalog, settingsState } from '../test/appFixtures';
+import {
+  claudeState,
+  codexState,
+  liveState,
+  providerCatalog,
+  settingsState,
+} from '../test/appFixtures';
 
 const catalog = new ProviderCatalogIndex(providerCatalog);
 const now = Date.parse('2026-07-10T10:00:00Z');
@@ -12,6 +18,7 @@ function renderDashboard(
   overrides: Partial<{
     viewState: UsageViewState;
     settings: AppSettings;
+    catalog: ProviderCatalogIndex;
     anyRefreshing: boolean;
     onRefreshAll: () => void;
     onRefreshProvider: (id: string) => void;
@@ -164,5 +171,199 @@ describe('WebDashboard', () => {
     expect(providers.getByRole('heading', { name: 'Codex' })).toBeInTheDocument();
     expect(providers.getByRole('heading', { name: 'Claude' })).toBeInTheDocument();
     expect(providers.getByText('Max')).toBeInTheDocument();
+  });
+
+  it('renders multiple discovered Cursor accounts independently', () => {
+    const cursorCatalog = new ProviderCatalogIndex({
+      apiKeyProviderIds: [],
+      providers: [
+        {
+          id: 'cursor@1111aaaa',
+          displayName: 'Cursor — 1111aaaa',
+          shortName: 'Cu',
+          fallbackEnabled: true,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+        {
+          id: 'cursor@2222bbbb',
+          displayName: 'Cursor — 2222bbbb',
+          shortName: 'Cu',
+          fallbackEnabled: false,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+      ],
+    });
+    const settings = {
+      ...structuredClone(settingsState.settings),
+      knownProviderIds: ['cursor@1111aaaa', 'cursor@2222bbbb'],
+      providerNames: {
+        'cursor@1111aaaa': 'Cursor Work',
+        'cursor@2222bbbb': 'Cursor Personal',
+      },
+      providers: [
+        { id: 'cursor@1111aaaa', enabled: true, detected: true, expanded: false, metrics: [] },
+        { id: 'cursor@2222bbbb', enabled: true, detected: true, expanded: false, metrics: [] },
+      ],
+    };
+    const viewState: UsageViewState = {
+      providers: {
+        'cursor@1111aaaa': {
+          ...codexState,
+          snapshot: { ...codexState.snapshot!, providerId: 'cursor@1111aaaa' },
+        },
+        'cursor@2222bbbb': {
+          ...claudeState,
+          snapshot: { ...claudeState.snapshot!, providerId: 'cursor@2222bbbb' },
+        },
+      },
+    };
+    renderDashboard({ catalog: cursorCatalog, settings, viewState });
+
+    const providers = within(screen.getByRole('region', { name: 'Providers' }));
+    expect(providers.getByRole('heading', { name: 'Cursor Work' })).toBeInTheDocument();
+    expect(providers.getByRole('heading', { name: 'Cursor Personal' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh Cursor Work' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh Cursor Personal' })).toBeInTheDocument();
+  });
+
+  it('renders multiple discovered Codex accounts independently', () => {
+    const codexCatalog = new ProviderCatalogIndex({
+      apiKeyProviderIds: [],
+      providers: [
+        {
+          id: 'codex',
+          displayName: 'Codex',
+          shortName: 'Cx',
+          fallbackEnabled: true,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+        {
+          id: 'codex@2222bbbb',
+          displayName: 'Codex — 2222bbbb',
+          shortName: 'Cx',
+          fallbackEnabled: false,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+      ],
+    });
+    const settings = {
+      ...structuredClone(settingsState.settings),
+      knownProviderIds: ['codex', 'codex@2222bbbb'],
+      providerNames: {
+        codex: 'Codex Work',
+        'codex@2222bbbb': 'Codex Personal',
+      },
+      providers: [
+        { id: 'codex', enabled: true, detected: true, expanded: false, metrics: [] },
+        { id: 'codex@2222bbbb', enabled: true, detected: true, expanded: false, metrics: [] },
+      ],
+    };
+    const viewState: UsageViewState = {
+      providers: {
+        codex: {
+          ...codexState,
+          snapshot: { ...codexState.snapshot!, providerId: 'codex' },
+        },
+        'codex@2222bbbb': {
+          ...claudeState,
+          snapshot: { ...claudeState.snapshot!, providerId: 'codex@2222bbbb' },
+        },
+      },
+    };
+    renderDashboard({ catalog: codexCatalog, settings, viewState });
+
+    const providers = within(screen.getByRole('region', { name: 'Providers' }));
+    expect(providers.getByRole('heading', { name: 'Codex Work' })).toBeInTheDocument();
+    expect(providers.getByRole('heading', { name: 'Codex Personal' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh Codex Work' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh Codex Personal' })).toBeInTheDocument();
+  });
+
+  it('renders multiple discovered Grok and Google accounts independently', () => {
+    const accountCatalog = new ProviderCatalogIndex({
+      apiKeyProviderIds: [],
+      providers: [
+        {
+          id: 'grok@1111aaaa',
+          displayName: 'Grok — 1111aaaa',
+          shortName: 'G',
+          fallbackEnabled: true,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+        {
+          id: 'grok@2222bbbb',
+          displayName: 'Grok — 2222bbbb',
+          shortName: 'G',
+          fallbackEnabled: false,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+        {
+          id: 'antigravity@3333cccc',
+          displayName: 'Google — 3333cccc',
+          shortName: 'A',
+          fallbackEnabled: true,
+          localUsageSourceNote: null,
+          links: [],
+          metrics: [],
+        },
+      ],
+    });
+    const settings = {
+      ...structuredClone(settingsState.settings),
+      knownProviderIds: ['grok@1111aaaa', 'grok@2222bbbb', 'antigravity@3333cccc'],
+      providerNames: {
+        'grok@1111aaaa': 'Grok Work',
+        'grok@2222bbbb': 'Grok Personal',
+        'antigravity@3333cccc': 'Google Personal',
+      },
+      providers: [
+        { id: 'grok@1111aaaa', enabled: true, detected: true, expanded: false, metrics: [] },
+        { id: 'grok@2222bbbb', enabled: true, detected: true, expanded: false, metrics: [] },
+        {
+          id: 'antigravity@3333cccc',
+          enabled: true,
+          detected: true,
+          expanded: false,
+          metrics: [],
+        },
+      ],
+    };
+    const viewState: UsageViewState = {
+      providers: {
+        'grok@1111aaaa': {
+          ...codexState,
+          snapshot: { ...codexState.snapshot!, providerId: 'grok@1111aaaa' },
+        },
+        'grok@2222bbbb': {
+          ...claudeState,
+          snapshot: { ...claudeState.snapshot!, providerId: 'grok@2222bbbb' },
+        },
+        'antigravity@3333cccc': {
+          ...claudeState,
+          snapshot: { ...claudeState.snapshot!, providerId: 'antigravity@3333cccc' },
+        },
+      },
+    };
+    renderDashboard({ catalog: accountCatalog, settings, viewState });
+
+    const providers = within(screen.getByRole('region', { name: 'Providers' }));
+    expect(providers.getByRole('heading', { name: 'Grok Work' })).toBeInTheDocument();
+    expect(providers.getByRole('heading', { name: 'Grok Personal' })).toBeInTheDocument();
+    expect(providers.getByRole('heading', { name: 'Google Personal' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh Grok Work' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh Grok Personal' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh Google Personal' })).toBeInTheDocument();
   });
 });
